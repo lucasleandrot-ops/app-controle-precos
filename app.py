@@ -73,6 +73,61 @@ with aba_minha_lista:
     else:
         st.info("Sua lista está vazia.")
 
+# --- ABA 1: MINHA LISTA (Versão com Somatórios) ---
+with aba_minha_lista:
+    st.header(f"Lista de Compras: {usuario_atual}")
+    
+    # [Mantemos a busca de produtos e ids_salvos como no código anterior]
+    res_prod = supabase.table("produtos").select("*").execute()
+    produtos_data = res_prod.data
+    dict_produtos = {f"{p['nome']} ({p['marca']})" if p['marca'] else p['nome']: p['id'] for p in produtos_data}
+    
+    res_minha_lista = supabase.table("listas").select("produto_id").eq("nome_usuario", usuario_atual).execute()
+    ids_salvos = [item['produto_id'] for item in res_minha_lista.data]
+    nomes_salvos = [name for name, id in dict_produtos.items() if id in ids_salvos]
+    
+    selecionados = st.multiselect("O que você precisa comprar hoje?", options=list(dict_produtos.keys()), default=nomes_salvos)
+    
+    if st.button("Salvar Minha Lista"):
+        supabase.table("listas").delete().eq("nome_usuario", usuario_atual).execute()
+        for item in selecionados:
+            supabase.table("listas").insert({"nome_usuario": usuario_atual, "produto_id": dict_produtos[item]}).execute()
+        st.success("Lista atualizada!")
+        st.rerun()
+
+    st.divider()
+
+    if ids_salvos:
+        res_hist = supabase.table("historico_precos").select("preco, produtos(id, nome, marca), supermercados(nome)").execute()
+        if res_hist.data:
+            df = pd.json_normalize(res_hist.data)
+            df_lista = df[df['produtos.id'].isin(ids_salvos)]
+            
+            if not df_lista.empty:
+                # Pega o menor preço para cada item da sua lista
+                idx_min = df_lista.groupby('produtos.id')['preco'].idxmin()
+                melhores = df_lista.loc[idx_min]
+                
+                total_geral = melhores['preco'].sum()
+                st.metric("Estimativa Total da Lista", f"R$ {total_geral:.2f}")
+
+                st.subheader("🛒 Onde comprar cada item:")
+                
+                # Exibe por mercado com subtotal
+                for mercado in melhores['supermercados.nome'].unique():
+                    itens_mercado = melhores[melhores['supermercados.nome'] == mercado]
+                    subtotal = itens_mercado['preco'].sum()
+                    
+                    # Título do mercado com o valor que você vai gastar lá
+                    with st.expander(f"📍 {mercado} — Subtotal: R$ {subtotal:.2f}", expanded=True):
+                        for _, row in itens_mercado.iterrows():
+                            nome = f"{row['produtos.nome']} ({row['produtos.marca']})" if row['produtos.marca'] else row['produtos.nome']
+                            st.write(f"✅ **{nome}**: R$ {row['preco']:.2f}")
+        else:
+            st.warning("Nenhum preço cadastrado.")
+    else:
+        st.info("Sua lista está vazia.")
+        
 # --- ABA 2: LANÇAMENTO ---
 with aba_lancamento:
     st.header("Registrar Novo Preço")
@@ -112,3 +167,4 @@ with aba_cadastros:
                 if n_p: 
                     supabase.table("produtos").insert({"nome": n_p, "marca": m_p}).execute()
                     st.rerun()
+
