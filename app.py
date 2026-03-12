@@ -21,7 +21,7 @@ st.sidebar.info(f"Gerenciando lista de: **{usuario_atual}**")
 # 2. Estrutura de Abas
 aba_minha_lista, aba_lancamento, aba_cadastros = st.tabs(["📋 Minha Lista", "💰 Lançar Preço", "⚙️ Cadastros"])
 
-# --- ABA 1: MINHA LISTA (INTELIGÊNCIA DE COMPRA) ---
+# --- ABA 1: MINHA LISTA ---
 with aba_minha_lista:
     st.header(f"Lista de Compras: {usuario_atual}")
     
@@ -30,40 +30,88 @@ with aba_minha_lista:
     produtos_data = res_prod.data
     dict_produtos = {f"{p['nome']} ({p['marca']})" if p['marca'] else p['nome']: p['id'] for p in produtos_data}
     
-    # Busca o que já está salvo para este usuário na tabela 'listas'
+    # Busca itens salvos para o usuário
     res_minha_lista = supabase.table("listas").select("produto_id").eq("nome_usuario", usuario_atual).execute()
     ids_salvos = [item['produto_id'] for item in res_minha_lista.data]
-    
-    # Identifica os nomes dos produtos já salvos para aparecerem selecionados no multiselect
     nomes_salvos = [name for name, id in dict_produtos.items() if id in ids_salvos]
     
     selecionados = st.multiselect("O que você precisa comprar hoje?", options=list(dict_produtos.keys()), default=nomes_salvos)
     
     if st.button("Salvar/Atualizar Minha Lista"):
-        # Limpa e atualiza a lista do usuário
         supabase.table("listas").delete().eq("nome_usuario", usuario_atual).execute()
         for item in selecionados:
             supabase.table("listas").insert({"nome_usuario": usuario_atual, "produto_id": dict_produtos[item]}).execute()
-        st.success("Lista salva com sucesso!")
+        st.success("Lista salva!")
         st.rerun()
 
     st.divider()
 
-    # Cálculo da melhor rota baseada nos menores preços
     if ids_salvos:
-        # Busca todo o histórico de preços com relacionamentos
         res_hist = supabase.table("historico_precos").select("preco, data_registro, produtos(id, nome, marca), supermercados(nome)").execute()
         
         if res_hist.data:
             df = pd.json_normalize(res_hist.data)
-            # Filtra apenas o que está na lista do usuário
             df_lista = df[df['produtos.id'].isin(ids_salvos)]
             
             if not df_lista.empty:
-                # Pega a linha do menor preço para cada produto
                 idx_min = df_lista.groupby('produtos.id')['preco'].idxmin()
                 melhores = df_lista.loc[idx_min]
                 
-                # Exibe métrica do valor total estimado
-                total_geral = melhores['preco'].sum()
-                st.metric("Estimativa Total da Lista", f"R$ {total_geral:.2
+                # Cálculo do Total (Ajustado para evitar erro de sintaxe)
+                total_val = melhores['preco'].sum()
+                st.metric("Estimativa Total", f"R$ {total_val:.2f}")
+
+                st.subheader("🛒 Onde comprar cada item:")
+                for mercado in melhores['supermercados.nome'].unique():
+                    itens_mercado = melhores[melhores['supermercados.nome'] == mercado]
+                    subtotal = itens_mercado['preco'].sum()
+                    
+                    with st.expander(f"📍 {mercado} — Subtotal: R$ {subtotal:.2f}", expanded=True):
+                        for _, row in itens_mercado.iterrows():
+                            n_exib = f"{row['produtos.nome']} ({row['produtos.marca']})" if row['produtos.marca'] else row['produtos.nome']
+                            st.write(f"✅ **{n_exib}**: R$ {row['preco']:.2f}")
+            else:
+                st.warning("Itens sem preços registrados.")
+        else:
+            st.warning("Nenhum preço no sistema.")
+    else:
+        st.info("Sua lista está vazia.")
+
+# --- ABA 2: LANÇAMENTO ---
+with aba_lancamento:
+    st.header("💰 Registrar Novo Preço")
+    res_merc = supabase.table("supermercados").select("*").execute()
+    mercados_data = res_merc.data
+    
+    if not produtos_data or not mercados_data:
+        st.warning("Cadastre produtos e mercados primeiro.")
+    else:
+        dict_mercados = {m['nome']: m['id'] for m in mercados_data}
+        with st.form("form_preco", clear_on_submit=True):
+            p_sel = st.selectbox("Produto", options=list(dict_produtos.keys()))
+            m_sel = st.selectbox("Supermercado", options=list(dict_mercados.keys()))
+            valor = st.number_input("Preço (R$)", min_value=0.01, step=0.01)
+            
+            if st.form_submit_button("Salvar"):
+                supabase.table("historico_precos").insert({"id_produto": dict_produtos[p_sel], "id_supermercado": dict_mercados[m_sel], "preco": valor}).execute()
+                st.success("Salvo!")
+
+# --- ABA 3: CADASTROS ---
+with aba_cadastros:
+    st.header("⚙️ Cadastros")
+    c1, c2 = st.columns(2)
+    with c1:
+        with st.form("cad_m", clear_on_submit=True):
+            n_m = st.text_input("Novo Supermercado")
+            if st.form_submit_button("Cadastrar Mercado"):
+                if n_m: 
+                    supabase.table("supermercados").insert({"nome": n_m}).execute()
+                    st.rerun()
+    with c2:
+        with st.form("cad_p", clear_on_submit=True):
+            n_p = st.text_input("Novo Produto")
+            m_p = st.text_input("Marca")
+            if st.form_submit_button("Cadastrar Produto"):
+                if n_p: 
+                    supabase.table("produtos").insert({"nome": n_p, "marca": m_p}).execute()
+                    st.rerun()
