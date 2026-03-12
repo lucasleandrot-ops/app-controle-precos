@@ -26,22 +26,21 @@ def gerar_link_whatsapp(nome_usuario, df_melhores, total):
             texto += f"- {nome}: R$ {row['preco']:.2f}\n"
         texto += "\n"
     texto += f"💰 *Total Estimado: R$ {total:.2f}*"
-    
-    # Codifica o texto para formato de URL
     texto_url = urllib.parse.quote(texto)
     return f"https://api.whatsapp.com/send?text={texto_url}"
 
-# --- BARRA LATERAL: IDENTIFICAÇÃO ---
+# --- BARRA LATERAL ---
 st.sidebar.title("👤 Identificação")
 usuario_atual = st.sidebar.text_input("Seu Nome", value="Visitante").strip().capitalize()
 
-# 2. Estrutura de Abas
-aba_minha_lista, aba_lancamento, aba_cadastros = st.tabs(["📋 Minha Lista", "💰 Lançar Preço", "⚙️ Cadastros"])
+# 2. Estrutura de Abas (Adicionada aba de Histórico Geral)
+aba_minha_lista, aba_lancamento, aba_analise, aba_cadastros = st.tabs([
+    "📋 Minha Lista", "💰 Lançar Preço", "📈 Histórico Geral", "⚙️ Cadastros"
+])
 
 # --- ABA 1: MINHA LISTA ---
 with aba_minha_lista:
     st.header(f"Lista de Compras: {usuario_atual}")
-    
     res_prod = supabase.table("produtos").select("*").execute()
     produtos_data = res_prod.data
     dict_produtos = {f"{p['nome']} ({p['marca']})" if p['marca'] else p['nome']: p['id'] for p in produtos_data}
@@ -62,53 +61,33 @@ with aba_minha_lista:
     st.divider()
 
     if ids_salvos:
-        res_hist = supabase.table("historico_precos").select("preco, produtos(id, nome, marca), supermercados(nome)").execute()
-        
+        res_hist = supabase.table("historico_precos").select("preco, data_registro, produtos(id, nome, marca), supermercados(nome)").execute()
         if res_hist.data:
             df = pd.json_normalize(res_hist.data)
             df_lista = df[df['produtos.id'].isin(ids_salvos)]
-            
             if not df_lista.empty:
                 idx_min = df_lista.groupby('produtos.id')['preco'].idxmin()
                 melhores = df_lista.loc[idx_min].sort_values(by="supermercados.nome")
-                
                 total_val = melhores['preco'].sum()
                 
                 c1, c2 = st.columns([1, 1])
-                with c1:
-                    st.metric("Estimativa Total", f"R$ {total_val:.2f}")
+                with c1: st.metric("Estimativa Total", f"R$ {total_val:.2f}")
                 with c2:
-                    # Botão do WhatsApp
                     link_wa = gerar_link_whatsapp(usuario_atual, melhores, total_val)
-                    st.markdown(f"""
-                        <a href="{link_wa}" target="_blank" style="text-decoration: none;">
-                            <button style="background-color: #25D366; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-weight: bold; margin-top: 25px;">
-                                📱 Enviar para WhatsApp
-                            </button>
-                        </a>
-                    """, unsafe_allow_html=True)
+                    st.markdown(f'<a href="{link_wa}" target="_blank"><button style="background-color: #25D366; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-weight: bold; margin-top: 25px;">📱 Enviar WhatsApp</button></a>', unsafe_allow_html=True)
 
-                st.subheader("🛒 Onde comprar cada item:")
                 for mercado in melhores['supermercados.nome'].unique():
-                    itens_mercado = melhores[melhores['supermercados.nome'] == mercado]
-                    subtotal = itens_mercado['preco'].sum()
-                    with st.expander(f"📍 {mercado} — Subtotal: R$ {subtotal:.2f}", expanded=True):
-                        for _, row in itens_mercado.iterrows():
-                            n_exib = f"{row['produtos.nome']} ({row['produtos.marca']})" if row['produtos.marca'] else row['produtos.nome']
-                            st.write(f"✅ **{n_exib}**: R$ {row['preco']:.2f}")
-            else:
-                st.warning("Itens sem preços registrados.")
-        else:
-            st.warning("Nenhum preço no sistema.")
-    else:
-        st.info("Sua lista está vazia.")
+                    itens_m = melhores[melhores['supermercados.nome'] == mercado]
+                    with st.expander(f"📍 {mercado} — R$ {itens_m['preco'].sum():.2f}", expanded=True):
+                        for _, row in itens_m.iterrows():
+                            n = f"{row['produtos.nome']} ({row['produtos.marca']})" if row['produtos.marca'] else row['produtos.nome']
+                            st.write(f"✅ **{n}**: R$ {row['preco']:.2f}")
 
 # --- ABA 2: LANÇAMENTO ---
 with aba_lancamento:
     st.header("💰 Registrar Novo Preço")
     res_merc = supabase.table("supermercados").select("*").execute()
     mercados_data = res_merc.data
-    
     if not produtos_data or not mercados_data:
         st.warning("Cadastre produtos e mercados primeiro.")
     else:
@@ -121,7 +100,26 @@ with aba_lancamento:
                 supabase.table("historico_precos").insert({"id_produto": dict_produtos[p_sel], "id_supermercado": dict_mercados[m_sel], "preco": valor}).execute()
                 st.success("Salvo!")
 
-# --- ABA 3: CADASTROS ---
+# --- NOVA ABA 3: HISTÓRICO GERAL (A VOLTA DOS DADOS) ---
+with aba_analise:
+    st.header("📈 Histórico e Tendências")
+    res_h = supabase.table("historico_precos").select("preco, data_registro, produtos(nome, marca), supermercados(nome)").execute()
+    if res_h.data:
+        df_h = pd.json_normalize(res_h.data)
+        df_h['Produto'] = df_h.apply(lambda x: f"{x['produtos.nome']} ({x['produtos.marca']})" if x['produtos.marca'] else x['produtos.nome'], axis=1)
+        df_h['Data'] = pd.to_datetime(df_h['data_registro']).dt.date
+        
+        st.subheader("Variação de Preços")
+        prod_alvo = st.selectbox("Selecione um produto para ver o gráfico:", options=sorted(df_h['Produto'].unique()))
+        df_grafico = df_h[df_h['Produto'] == prod_alvo]
+        st.line_chart(df_grafico, x="Data", y="preco", color="supermercados.nome")
+        
+        st.subheader("Todos os Registros")
+        st.dataframe(df_h[['Data', 'Produto', 'supermercados.nome', 'preco']].sort_values(by='Data', ascending=False), use_container_width=True)
+    else:
+        st.info("Ainda não há dados históricos para exibir.")
+
+# --- ABA 4: CADASTROS ---
 with aba_cadastros:
     st.header("⚙️ Cadastros")
     c1, c2 = st.columns(2)
