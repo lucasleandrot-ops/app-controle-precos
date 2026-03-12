@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from supabase import create_client, Client
+import urllib.parse
 
 # 1. Configuração e Conexão
 st.set_page_config(page_title="Controle de Preços", page_icon="🛒", layout="wide")
@@ -13,10 +14,26 @@ def init_connection():
 
 supabase: Client = init_connection()
 
+# Função para formatar a mensagem do WhatsApp
+def gerar_link_whatsapp(nome_usuario, df_melhores, total):
+    texto = f"🛒 *Lista de Compras - {nome_usuario}*\n\n"
+    for mercado in df_melhores['supermercados.nome'].unique():
+        itens_mercado = df_melhores[df_melhores['supermercados.nome'] == mercado]
+        subtotal = itens_mercado['preco'].sum()
+        texto += f"📍 *{mercado}* (Subtotal: R$ {subtotal:.2f})\n"
+        for _, row in itens_mercado.iterrows():
+            nome = f"{row['produtos.nome']} ({row['produtos.marca']})" if row['produtos.marca'] else row['produtos.nome']
+            texto += f"- {nome}: R$ {row['preco']:.2f}\n"
+        texto += "\n"
+    texto += f"💰 *Total Estimado: R$ {total:.2f}*"
+    
+    # Codifica o texto para formato de URL
+    texto_url = urllib.parse.quote(texto)
+    return f"https://api.whatsapp.com/send?text={texto_url}"
+
 # --- BARRA LATERAL: IDENTIFICAÇÃO ---
 st.sidebar.title("👤 Identificação")
 usuario_atual = st.sidebar.text_input("Seu Nome", value="Visitante").strip().capitalize()
-st.sidebar.info(f"Gerenciando lista de: **{usuario_atual}**")
 
 # 2. Estrutura de Abas
 aba_minha_lista, aba_lancamento, aba_cadastros = st.tabs(["📋 Minha Lista", "💰 Lançar Preço", "⚙️ Cadastros"])
@@ -25,12 +42,10 @@ aba_minha_lista, aba_lancamento, aba_cadastros = st.tabs(["📋 Minha Lista", "�
 with aba_minha_lista:
     st.header(f"Lista de Compras: {usuario_atual}")
     
-    # Busca produtos cadastrados
     res_prod = supabase.table("produtos").select("*").execute()
     produtos_data = res_prod.data
     dict_produtos = {f"{p['nome']} ({p['marca']})" if p['marca'] else p['nome']: p['id'] for p in produtos_data}
     
-    # Busca itens salvos para o usuário
     res_minha_lista = supabase.table("listas").select("produto_id").eq("nome_usuario", usuario_atual).execute()
     ids_salvos = [item['produto_id'] for item in res_minha_lista.data]
     nomes_salvos = [name for name, id in dict_produtos.items() if id in ids_salvos]
@@ -47,7 +62,7 @@ with aba_minha_lista:
     st.divider()
 
     if ids_salvos:
-        res_hist = supabase.table("historico_precos").select("preco, data_registro, produtos(id, nome, marca), supermercados(nome)").execute()
+        res_hist = supabase.table("historico_precos").select("preco, produtos(id, nome, marca), supermercados(nome)").execute()
         
         if res_hist.data:
             df = pd.json_normalize(res_hist.data)
@@ -55,17 +70,28 @@ with aba_minha_lista:
             
             if not df_lista.empty:
                 idx_min = df_lista.groupby('produtos.id')['preco'].idxmin()
-                melhores = df_lista.loc[idx_min]
+                melhores = df_lista.loc[idx_min].sort_values(by="supermercados.nome")
                 
-                # Cálculo do Total (Ajustado para evitar erro de sintaxe)
                 total_val = melhores['preco'].sum()
-                st.metric("Estimativa Total", f"R$ {total_val:.2f}")
+                
+                c1, c2 = st.columns([1, 1])
+                with c1:
+                    st.metric("Estimativa Total", f"R$ {total_val:.2f}")
+                with c2:
+                    # Botão do WhatsApp
+                    link_wa = gerar_link_whatsapp(usuario_atual, melhores, total_val)
+                    st.markdown(f"""
+                        <a href="{link_wa}" target="_blank" style="text-decoration: none;">
+                            <button style="background-color: #25D366; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-weight: bold; margin-top: 25px;">
+                                📱 Enviar para WhatsApp
+                            </button>
+                        </a>
+                    """, unsafe_allow_html=True)
 
                 st.subheader("🛒 Onde comprar cada item:")
                 for mercado in melhores['supermercados.nome'].unique():
                     itens_mercado = melhores[melhores['supermercados.nome'] == mercado]
                     subtotal = itens_mercado['preco'].sum()
-                    
                     with st.expander(f"📍 {mercado} — Subtotal: R$ {subtotal:.2f}", expanded=True):
                         for _, row in itens_mercado.iterrows():
                             n_exib = f"{row['produtos.nome']} ({row['produtos.marca']})" if row['produtos.marca'] else row['produtos.nome']
@@ -91,7 +117,6 @@ with aba_lancamento:
             p_sel = st.selectbox("Produto", options=list(dict_produtos.keys()))
             m_sel = st.selectbox("Supermercado", options=list(dict_mercados.keys()))
             valor = st.number_input("Preço (R$)", min_value=0.01, step=0.01)
-            
             if st.form_submit_button("Salvar"):
                 supabase.table("historico_precos").insert({"id_produto": dict_produtos[p_sel], "id_supermercado": dict_mercados[m_sel], "preco": valor}).execute()
                 st.success("Salvo!")
